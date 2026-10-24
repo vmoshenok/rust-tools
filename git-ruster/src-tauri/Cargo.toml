@@ -1,0 +1,25 @@
+[package]
+name = "git-ruster"
+version = "0.1.0"
+description = "Git Ruster - git client with graph, built-in terminal, diff viewer and 3-way merge tool"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+notify-debouncer-mini = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

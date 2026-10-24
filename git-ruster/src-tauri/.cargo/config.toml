@@ -1,0 +1,4 @@
+# Keep dependency resolution compatible with the installed rustc (1.87).
+[resolver]
+incompatible-rust-versions = "fallback"
+
