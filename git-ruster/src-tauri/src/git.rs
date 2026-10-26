@@ -101,7 +101,7 @@ fn merge_source_from_msg(msg: &str) -> Option<String> {
     Some(first[start + 1..start + 1 + end].to_string())
 }
 
-fn parse_track(track: &str) -> (u32, u32, bool) {
+pub fn parse_track(track: &str) -> (u32, u32, bool) {
     let mut ahead = 0;
     let mut behind = 0;
     let gone = track.contains("gone");

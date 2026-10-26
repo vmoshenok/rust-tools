@@ -18,12 +18,13 @@ import { RevisionPicker } from "./RevisionPicker";
 import { Splitter } from "./Splitter";
 import { setTerminalFontSize } from "../terminal";
 import { initRepo } from "../actions";
+import { startAutoFetch } from "../autofetch";
 
 export function App() {
   const s = useAppState();
 
   useEffect(() => {
-    loadConfig().catch(toastError);
+    loadConfig().then(startAutoFetch).catch(toastError);
     const unlisten = [
       listen<Config>("config-changed", (e) => loadConfig(e.payload).catch(toastError)),
       listen<{ path: string; git: boolean }>("repo-changed", (e) => onRepoChanged(e.payload.path, e.payload.git)),

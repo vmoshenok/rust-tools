@@ -154,6 +154,13 @@ export interface ConflictVersions {
   work: Blob;
 }
 
+export interface FetchResult {
+  /** remote-tracking refs or tags changed */
+  changed: boolean;
+  /** commits local branches are behind their upstreams (sum) */
+  behind: number;
+}
+
 export const api = {
   getConfig: () => invoke<Config>("get_config"),
   addFolders: (paths: string[]) => invoke<Config>("add_folders", { paths }),
@@ -178,6 +185,7 @@ export const api = {
   lastCommitMessage: (repo: string) => invoke<string>("last_commit_message", { repo }),
   writeTempFile: (name: string, content: string) => invoke<string>("write_temp_file", { name, content }),
   openInExplorer: (path: string) => invoke<void>("open_in_explorer", { path }),
+  fetchRepo: (repo: string) => invoke<FetchResult>("fetch_repo", { repo }),
 
   termOpen: (id: string, cwd: string, cols: number, rows: number) =>
     invoke<void>("term_open", { id, cwd, cols, rows }),

@@ -55,6 +55,14 @@ async function readSide(repo: string, side: Side): Promise<Blob> {
   }
 }
 
+/** Display width of a line in character cells (tabs expand to the next multiple of 4). */
+function visualCols(line: string) {
+  if (!line.includes("\t")) return line.length;
+  let c = 0;
+  for (const ch of line) c = ch === "\t" ? c + 4 - (c % 4) : c + 1;
+  return c;
+}
+
 function pref<T>(key: string, def: T): T {
   try {
     const v = localStorage.getItem("git-ruster:" + key);
@@ -109,15 +117,18 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
   const [mode, setMode] = useState<"split" | "unified">(() => pref("diffMode", "split"));
   const [ignoreWs, setIgnoreWs] = useState<boolean>(() => pref("diffIgnoreWs", false));
   const [collapse, setCollapse] = useState<boolean>(() => pref("diffCollapse", true));
+  const [wrap, setWrap] = useState<boolean>(() => pref("diffWrap", false));
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [current, setCurrent] = useState(-1);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(600);
+  const [viewW, setViewW] = useState(1200);
   const [hx, setHx] = useState(0);
   const [charW, setCharW] = useState(7.8);
   const [reload, setReload] = useState(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
+  const hbarRef = useRef<HTMLDivElement>(null);
 
   const close = () => setState({ diff: null });
 
@@ -146,9 +157,10 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
   useLayoutEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setViewH(el.clientHeight));
+    const measure = () => (setViewH(el.clientHeight), setViewW(el.clientWidth));
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setViewH(el.clientHeight);
+    measure();
     if (measureRef.current) setCharW(measureRef.current.getBoundingClientRect().width / 100 || 7.8);
     return () => ro.disconnect();
   }, [data !== null]);
@@ -196,6 +208,38 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
     return out;
   }, [model, mode, collapse, expanded]);
 
+  // Width of one text column: the grid's fixed columns (see .d-row in styles.css) and the text padding.
+  const textW = Math.max(50, (mode === "split" ? (viewW - 122) / 2 : viewW - 116) - 6);
+  const wrapCols = Math.max(10, Math.floor((textW - 2) / charW));
+
+  /** Row tops in px (length rows.length + 1); rows grow when wrapped. */
+  const tops = useMemo(() => {
+    const t = new Array<number>(rows.length + 1);
+    t[0] = 0;
+    rows.forEach((r, i) => {
+      let lines = 1;
+      if (wrap && data && r.kind === "line") {
+        const a = r.a !== null ? visualCols(data.a.lines[r.a]) : 0;
+        const b = r.b !== null ? visualCols(data.b.lines[r.b]) : 0;
+        lines = Math.max(1, Math.ceil((mode === "split" ? Math.max(a, b) : r.b === null ? a : b) / wrapCols));
+      }
+      t[i + 1] = t[i] + lines * LINE_H;
+    });
+    return t;
+  }, [rows, wrap, wrapCols, data, mode]);
+  const totalH = tops[rows.length];
+  /** Index of the row at `y` px. */
+  const rowAt = (y: number) => {
+    let lo = 0;
+    let hi = rows.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tops[mid + 1] <= y) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
   const changeRows = useMemo(() => rows.map((r, i) => (r.first ? i : -1)).filter((i) => i >= 0), [rows]);
 
   const goChange = (dir: 1 | -1) => {
@@ -209,14 +253,14 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
     }
     setCurrent(n);
     const el = bodyRef.current;
-    if (el) el.scrollTop = Math.max(0, changeRows[n] * LINE_H - el.clientHeight / 3);
+    if (el) el.scrollTop = Math.max(0, tops[changeRows[n]] - el.clientHeight / 3);
   };
 
   // Jump to the first change when a file is opened.
   useEffect(() => {
     if (current === -1 && changeRows.length && bodyRef.current) {
       setCurrent(0);
-      bodyRef.current.scrollTop = Math.max(0, changeRows[0] * LINE_H - bodyRef.current.clientHeight / 3);
+      bodyRef.current.scrollTop = Math.max(0, tops[changeRows[0]] - bodyRef.current.clientHeight / 3);
     }
   }, [changeRows]);
 
@@ -252,21 +296,27 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
   const maxLen = useMemo(() => {
     if (!data) return 0;
     let m = 0;
-    for (const l of data.a.lines) m = Math.max(m, l.length);
-    for (const l of data.b.lines) m = Math.max(m, l.length);
+    for (const l of data.a.lines) m = Math.max(m, visualCols(l));
+    for (const l of data.b.lines) m = Math.max(m, visualCols(l));
     return m;
   }, [data]);
+  const maxHx = wrap ? 0 : Math.max(0, Math.ceil(maxLen * charW - textW + 20));
   const onWheel = (e: WheelEvent) => {
     const dx = e.shiftKey ? e.deltaY : e.deltaX;
     if (dx && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
       e.preventDefault();
-      const cellW = (bodyRef.current?.clientWidth ?? 800) / (mode === "split" ? 2 : 1) - 90;
-      setHx((x) => Math.max(0, Math.min(Math.max(0, maxLen * charW - cellW + 40), x + dx)));
+      setHx((x) => Math.max(0, Math.min(maxHx, x + dx)));
     }
   };
+  // Keep the horizontal scrollbar in sync with wheel panning; clamp after resizes.
+  useEffect(() => {
+    if (hx > maxHx) setHx(maxHx);
+    if (hbarRef.current && Math.abs(hbarRef.current.scrollLeft - hx) > 1) hbarRef.current.scrollLeft = hx;
+  }, [hx, maxHx]);
+  const shift = wrap ? 0 : hx;
 
-  const start = Math.max(0, Math.floor(scrollTop / LINE_H) - 10);
-  const end = Math.min(rows.length, Math.ceil((scrollTop + viewH) / LINE_H) + 10);
+  const start = Math.max(0, rowAt(scrollTop) - 10);
+  const end = Math.min(rows.length, rowAt(scrollTop + viewH) + 11);
 
   const textCell = (side: "a" | "b", r: Row) => {
     const idx = side === "a" ? r.a : r.b;
@@ -276,7 +326,7 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
     const ranges = (side === "a" ? model.ra : model.rb).get(idx);
     return (
       <div class="d-text">
-        <div class="d-text-inner" style={{ transform: `translateX(${-hx}px)` }}>
+        <div class={`d-text-inner ${wrap ? "wrap" : ""}`} style={shift ? { transform: `translateX(${-shift}px)` } : undefined}>
           <LineContent text={line} tokens={tokens} ranges={ranges} />
         </div>
       </div>
@@ -341,6 +391,10 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
             <input type="checkbox" checked={collapse} onChange={(e) => (setCollapse((e.target as HTMLInputElement).checked), setExpanded(new Set()), setPref("diffCollapse", (e.target as HTMLInputElement).checked))} />
             Collapse unchanged
           </label>
+          <label class="check">
+            <input type="checkbox" checked={wrap} onChange={(e) => (setWrap((e.target as HTMLInputElement).checked), setPref("diffWrap", (e.target as HTMLInputElement).checked))} />
+            Wrap lines
+          </label>
           <button class="icon-btn" title="Close (Esc)" onClick={close}>
             <Icon name="x" size={18} />
           </button>
@@ -392,63 +446,72 @@ export function DiffViewer({ req }: { req: DiffRequest }) {
           )}
           {model && (
             <div class="diff-body-wrap">
-              <div class={`diff-body ${mode}`} ref={bodyRef} onScroll={(e) => setScrollTop((e.target as HTMLElement).scrollTop)} onWheel={onWheel}>
-                <div style={{ height: px(rows.length * LINE_H), position: "relative" }}>
-                  {rows.slice(start, end).map((r, k) => {
-                    const i = start + k;
-                    const top = px(i * LINE_H);
-                    const isCur = current >= 0 && blocks[r.block] && changeRows[current] !== undefined && rows[changeRows[current]]?.block === r.block;
-                    if (r.kind === "fold")
+              <div class="diff-body-col">
+                <div class={`diff-body ${mode}`} ref={bodyRef} onScroll={(e) => setScrollTop((e.target as HTMLElement).scrollTop)} onWheel={onWheel}>
+                  <div style={{ height: px(totalH), position: "relative" }}>
+                    {rows.slice(start, end).map((r, k) => {
+                      const i = start + k;
+                      const h = tops[i + 1] - tops[i];
+                      const top = px(tops[i]);
+                      const isCur = current >= 0 && blocks[r.block] && changeRows[current] !== undefined && rows[changeRows[current]]?.block === r.block;
+                      if (r.kind === "fold")
+                        return (
+                          <div key={i} class="d-row d-fold" style={{ top }} onClick={() => setExpanded(new Set([...expanded, r.block]))}>
+                            <Icon name="diff" size={12} /> {r.fold} unchanged lines — click to expand
+                          </div>
+                        );
+                      if (mode === "split")
+                        return (
+                          <div key={i} class={`d-row ${isCur ? "cur" : ""}`} style={{ top, height: px(h) }}>
+                            <div class={`d-ln ${typeCls(r, "a")}`}>{r.a !== null ? r.a + 1 : ""}</div>
+                            <div class={`d-side ${typeCls(r, "a")} ${r.a === null && r.type !== "eq" ? "pad" : ""}`}>{textCell("a", r)}</div>
+                            <div class="d-gutter">
+                              {r.first && canRevert && (
+                                <button class="revert-btn" title="Revert this change" onClick={() => revertBlock(blocks[r.block])}>
+                                  »
+                                </button>
+                              )}
+                            </div>
+                            <div class={`d-ln ${typeCls(r, "b")}`}>{r.b !== null ? r.b + 1 : ""}</div>
+                            <div class={`d-side ${typeCls(r, "b")} ${r.b === null && r.type !== "eq" ? "pad" : ""}`}>{textCell("b", r)}</div>
+                          </div>
+                        );
+                      const side = r.a !== null && r.b === null ? "a" : "b";
                       return (
-                        <div key={i} class="d-row d-fold" style={{ top }} onClick={() => setExpanded(new Set([...expanded, r.block]))}>
-                          <Icon name="diff" size={12} /> {r.fold} unchanged lines — click to expand
-                        </div>
-                      );
-                    if (mode === "split")
-                      return (
-                        <div key={i} class={`d-row ${isCur ? "cur" : ""}`} style={{ top }}>
-                          <div class={`d-ln ${typeCls(r, "a")}`}>{r.a !== null ? r.a + 1 : ""}</div>
-                          <div class={`d-side ${typeCls(r, "a")} ${r.a === null && r.type !== "eq" ? "pad" : ""}`}>{textCell("a", r)}</div>
-                          <div class="d-gutter">
-                            {r.first && canRevert && (
+                        <div key={i} class={`d-row unified ${isCur ? "cur" : ""}`} style={{ top, height: px(h) }}>
+                          <div class={`d-ln ${typeCls(r, side)}`}>{r.a !== null ? r.a + 1 : ""}</div>
+                          <div class={`d-ln ${typeCls(r, side)}`}>{r.b !== null ? r.b + 1 : ""}</div>
+                          <div class={`d-mark ${typeCls(r, side)}`}>
+                            {r.first && canRevert ? (
                               <button class="revert-btn" title="Revert this change" onClick={() => revertBlock(blocks[r.block])}>
                                 »
                               </button>
-                            )}
+                            ) : r.type === "eq" ? "" : side === "a" ? "−" : "+"}
                           </div>
-                          <div class={`d-ln ${typeCls(r, "b")}`}>{r.b !== null ? r.b + 1 : ""}</div>
-                          <div class={`d-side ${typeCls(r, "b")} ${r.b === null && r.type !== "eq" ? "pad" : ""}`}>{textCell("b", r)}</div>
+                          <div class={`d-side ${typeCls(r, side)}`}>{textCell(side, r)}</div>
                         </div>
                       );
-                    const side = r.a !== null && r.b === null ? "a" : "b";
-                    return (
-                      <div key={i} class={`d-row unified ${isCur ? "cur" : ""}`} style={{ top }}>
-                        <div class={`d-ln ${typeCls(r, side)}`}>{r.a !== null ? r.a + 1 : ""}</div>
-                        <div class={`d-ln ${typeCls(r, side)}`}>{r.b !== null ? r.b + 1 : ""}</div>
-                        <div class={`d-mark ${typeCls(r, side)}`}>
-                          {r.first && canRevert ? (
-                            <button class="revert-btn" title="Revert this change" onClick={() => revertBlock(blocks[r.block])}>
-                              »
-                            </button>
-                          ) : r.type === "eq" ? "" : side === "a" ? "−" : "+"}
-                        </div>
-                        <div class={`d-side ${typeCls(r, side)}`}>{textCell(side, r)}</div>
-                      </div>
-                    );
-                  })}
+                    })}
+                  </div>
                 </div>
+                {maxHx > 0 && (
+                  <div class="d-hscroll" ref={hbarRef} onScroll={(e) => setHx(Math.min(maxHx, (e.target as HTMLElement).scrollLeft))}>
+                    <div style={{ width: `calc(100% + ${px(maxHx)})`, height: "1px" }} />
+                  </div>
+                )}
               </div>
               <div class="d-ruler">
                 {rows.length > 0 &&
                   changeRows.map((ri) => {
                     const bl = blocks[rows[ri].block];
                     const n = mode === "split" ? Math.max(bl.aLen, bl.bLen) : bl.aLen + bl.bLen;
+                    const h = tops[Math.min(rows.length, ri + n)] - tops[ri];
                     return (
                       <div
                         key={ri}
                         class={`d-ruler-mark t-${bl.type}`}
-                        style={{ top: `${(ri / rows.length) * 100}%`, height: `max(3px, ${(n / rows.length) * 100}%)` }}
-                        onClick={() => bodyRef.current && (bodyRef.current.scrollTop = ri * LINE_H - viewH / 3)}
+                        style={{ top: `${(tops[ri] / totalH) * 100}%`, height: `max(3px, ${(h / totalH) * 100}%)` }}
+                        onClick={() => bodyRef.current && (bodyRef.current.scrollTop = tops[ri] - viewH / 3)}
                       />
                     );
                   })}

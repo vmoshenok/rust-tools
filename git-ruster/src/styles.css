@@ -389,6 +389,13 @@ input[type="checkbox"] {
 .track.gone {
   color: var(--danger);
 }
+.fetch-new {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #7fc6ff;
+  flex: none;
+}
 .side-bottom {
   display: flex;
   align-items: center;
@@ -1041,8 +1048,21 @@ input[type="checkbox"] {
   min-height: 0;
   display: flex;
 }
+.diff-body-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.d-hscroll {
+  flex: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid var(--border);
+}
 .diff-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   font-family: var(--mono);
@@ -1080,6 +1100,10 @@ input[type="checkbox"] {
 .d-text-inner {
   white-space: pre;
   tab-size: 4;
+}
+.d-text-inner.wrap {
+  white-space: break-spaces;
+  word-break: break-all;
 }
 .d-side.pad,
 .d-text.filler {

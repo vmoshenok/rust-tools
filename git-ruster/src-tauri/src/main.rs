@@ -3,6 +3,7 @@
 
 mod config;
 mod explorer;
+mod fetch;
 mod git;
 mod graph;
 mod pty;
@@ -59,6 +60,7 @@ fn main() {
             git::last_commit_message,
             git::write_temp_file,
             git::open_in_explorer,
+            fetch::fetch_repo,
             pty::term_open,
             pty::term_write,
             pty::term_resize,

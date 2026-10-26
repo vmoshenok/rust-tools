@@ -22,7 +22,7 @@ struct Changed {
 
 fn is_noise(p: &Path) -> bool {
     let s = p.to_string_lossy().replace('\\', "/");
-    s.contains("/.git/objects/") || s.ends_with(".lock") || s.contains("/.git/logs/")
+    s.contains("/.git/objects/") || s.ends_with(".lock") || s.contains("/.git/logs/") || s.ends_with("/.git/FETCH_HEAD")
 }
 
 #[tauri::command]

@@ -39,6 +39,15 @@ export interface RevisionPickerRequest {
   resolve: (r: Revision | null) => void;
 }
 
+/** Result of the last background fetch of a repository. */
+export interface FetchState {
+  fetching: boolean;
+  behind: number;
+  /** something new was fetched since the repository was last opened */
+  fresh: boolean;
+  error: string | null;
+}
+
 export interface AppState {
   config: Config | null;
   folders: FolderNode[];
@@ -66,6 +75,8 @@ export interface AppState {
   focusCommitRequest: number;
   /** sha to scroll the graph to */
   scrollTo: { sha: string; n: number } | null;
+  /** background fetch results by repository path */
+  fetchState: Record<string, FetchState>;
 }
 
 let state: AppState = {
@@ -88,6 +99,7 @@ let state: AppState = {
   amendRequest: 0,
   focusCommitRequest: 0,
   scrollTo: null,
+  fetchState: {},
 };
 
 const listeners = new Set<() => void>();
@@ -152,7 +164,9 @@ export async function reloadFolders() {
 
 export async function selectRepo(path: string | null) {
   if (path === state.repo && path) return refreshAll();
-  setState({ repo: path, info: null, graph: null, status: [], selected: null, compare: null, repoError: null, diff: null, merge: null });
+  const fs = path ? state.fetchState[path] : undefined;
+  const fetchState = fs?.fresh ? { ...state.fetchState, [path!]: { ...fs, fresh: false } } : state.fetchState;
+  setState({ repo: path, info: null, graph: null, status: [], selected: null, compare: null, repoError: null, diff: null, merge: null, fetchState });
   api.setSelected(path).catch(() => {});
   api.watchRepo(path).catch(() => {});
   if (path) await refreshAll();

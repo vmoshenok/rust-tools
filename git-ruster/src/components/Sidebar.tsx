@@ -1,5 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, FolderNode } from "../api";
+import { fetchUnseen } from "../autofetch";
 import { getState, loadConfig, reloadFolders, repoView, selectRepo, setState, ui, updateUi, useAppState } from "../state";
 import { showMenu, sep, toastError } from "../ui";
 import * as A from "../actions";
@@ -10,6 +11,7 @@ export async function addFolderPaths(paths: string[]) {
   try {
     const cfg = await api.addFolders(paths);
     await loadConfig(cfg);
+    fetchUnseen();
   } catch (e) {
     toastError(e);
   }
@@ -62,6 +64,27 @@ function Section({ id, title, count, children, actions }: { id: string; title: s
       </div>
       {!collapsed && <div class="side-section-body">{children}</div>}
     </div>
+  );
+}
+
+/** Result of the background fetch: commits behind upstream, "new" dot, error mark. */
+function FetchBadge({ path }: { path: string }) {
+  const f = getState().fetchState[path];
+  if (!f) return null;
+  return (
+    <>
+      {f.fresh && <span class="fetch-new" title="New commits or branches fetched since you last opened it" />}
+      {f.behind > 0 && (
+        <span class="track behind" title={`Local branches are ${f.behind} commit${f.behind === 1 ? "" : "s"} behind their upstreams`}>
+          ↓{f.behind}
+        </span>
+      )}
+      {f.error && (
+        <span class="track gone" title={`Background fetch failed:\n${f.error}`}>
+          !
+        </span>
+      )}
+    </>
   );
 }
 
@@ -119,6 +142,7 @@ export function Sidebar() {
                   <Icon name={f.kind === "repo" ? "repo" : "folder"} size={14} />
                   <span class="name">{f.name}</span>
                   {f.kind === "missing" && <span class="muted"> (missing)</span>}
+                  {f.kind === "repo" && <FetchBadge path={f.path} />}
                   {f.kind === "group" && <span class="count">{f.children.length}</span>}
                 </div>
                 {f.kind === "group" &&
@@ -132,6 +156,7 @@ export function Sidebar() {
                     >
                       <Icon name="repo" size={14} />
                       <span class="name">{c.name}</span>
+                      <FetchBadge path={c.path} />
                     </div>
                   ))}
               </div>
