@@ -46,27 +46,52 @@ struct Proc {
     cpu: f32, // % of the whole machine (all cores = 100%)
 }
 
-/// (peak working set, peak private bytes) straight from the OS; sysinfo doesn't expose them.
-/// Returns zeros when the process can't be opened (protected / other session without admin).
-fn peaks(pid: u32) -> (u64, u64) {
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        System::{
-            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
-            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        },
-    };
-    // SAFETY: handle checked for null, counters struct is plain data sized correctly, handle closed.
+#[derive(Clone, Copy, Default)]
+struct Mem {
+    ws: u64,
+    private: u64,
+    peak_ws: u64,
+    peak_private: u64,
+}
+
+/// Memory of every process from one NtQuerySystemInformation call, keyed by PID.
+/// Unlike OpenProcess + GetProcessMemoryInfo (what sysinfo does) it needs no handle, so
+/// protected and SYSTEM processes get real numbers too, same as Process Explorer.
+fn nt_memory() -> HashMap<u32, Mem> {
+    use windows_sys::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
+    use windows_sys::Win32::System::WindowsProgramming::SYSTEM_PROCESS_INFORMATION;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+    let mut buf: Vec<u64> = vec![0; 64 * 1024]; // u64 keeps the structs 8-byte aligned
+    let mut out = HashMap::new();
+    // SAFETY: the kernel fills `buf` with a chain of SYSTEM_PROCESS_INFORMATION records linked
+    // by NextEntryOffset (0 = last); we only read inside the length it reported.
     unsafe {
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if h.is_null() {
-            return (0, 0);
+        let len = loop {
+            let mut needed = 0u32;
+            let bytes = (buf.len() * 8) as u32;
+            match NtQuerySystemInformation(SystemProcessInformation, buf.as_mut_ptr().cast(), bytes, &mut needed) {
+                0 => break needed as usize,
+                STATUS_INFO_LENGTH_MISMATCH => buf.resize((needed as usize + 64 * 1024) / 8, 0), // headroom: new processes appear between calls
+                _ => return out,
+            }
+        };
+        let base = buf.as_ptr().cast::<u8>();
+        let mut off = 0usize;
+        while off + size_of::<SYSTEM_PROCESS_INFORMATION>() <= len {
+            let e = &*base.add(off).cast::<SYSTEM_PROCESS_INFORMATION>();
+            out.insert(e.UniqueProcessId as usize as u32, Mem {
+                ws: e.WorkingSetSize as u64,
+                private: e.PagefileUsage as u64, // = PrivateUsage from GetProcessMemoryInfo
+                peak_ws: e.PeakWorkingSetSize as u64,
+                peak_private: e.PeakPagefileUsage as u64,
+            });
+            if e.NextEntryOffset == 0 {
+                break;
+            }
+            off += e.NextEntryOffset as usize;
         }
-        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        let ok = GetProcessMemoryInfo(h, &mut c, size_of::<PROCESS_MEMORY_COUNTERS>() as u32);
-        CloseHandle(h);
-        if ok == 0 { (0, 0) } else { (c.PeakWorkingSetSize as u64, c.PeakPagefileUsage as u64) }
     }
+    out
 }
 
 /// Terminates the given (pid, start time) pairs, skipping any PID that now belongs to a
@@ -91,21 +116,22 @@ fn snapshot(sys: &mut System) -> Vec<Proc> {
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::nothing().with_memory().with_cpu(),
+        ProcessRefreshKind::nothing().with_cpu(),
     );
+    let mem = nt_memory();
     sys.processes()
         .values()
         .map(|p| {
-            let (peak_ws, peak_private) = peaks(p.pid().as_u32());
+            let m = mem.get(&p.pid().as_u32()).copied().unwrap_or_default();
             Proc {
             pid: p.pid().as_u32(),
             ppid: p.parent().map(|x| x.as_u32()),
             start: p.start_time(),
             name: p.name().to_string_lossy().into_owned().into(),
-            ws: p.memory(),
-            private: p.virtual_memory(),
-            peak_ws,
-            peak_private,
+            ws: m.ws,
+            private: m.private,
+            peak_ws: m.peak_ws,
+            peak_private: m.peak_private,
             cpu: p.cpu_usage() / cores,
         }})
         .collect()
@@ -811,7 +837,6 @@ impl Details {
             ProcessesToUpdate::Some(&[pid]),
             true,
             ProcessRefreshKind::nothing()
-                .with_memory()
                 .with_cmd(UpdateKind::Always)
                 .with_environ(UpdateKind::Always)
                 .with_exe(UpdateKind::Always)
@@ -838,13 +863,14 @@ impl Details {
     }
 
     fn push_sample(&mut self) {
-        let Some(p) = self.sys.process(self.pid) else {
+        if self.sys.process(self.pid).is_none() {
             self.alive = false;
             return;
-        };
-        self.peak = peaks(self.pid.as_u32());
+        }
+        let m = nt_memory().get(&self.pid.as_u32()).copied().unwrap_or_default();
+        self.peak = (m.peak_ws, m.peak_private);
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-        self.history.push_back(Sample { t: format!("{}s", self.tick), ws: mb(p.memory()), private: mb(p.virtual_memory()) });
+        self.history.push_back(Sample { t: format!("{}s", self.tick), ws: mb(m.ws), private: mb(m.private) });
         if self.history.len() > HISTORY {
             self.history.pop_front();
         }
@@ -858,7 +884,7 @@ impl Details {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[self.pid]),
             true,
-            ProcessRefreshKind::nothing().with_memory(),
+            ProcessRefreshKind::nothing(),
         );
         self.push_sample();
         cx.notify();
@@ -1024,6 +1050,13 @@ mod tests {
         assert_eq!(pids, vec![1, 2, 3]);
         let order: Vec<u32> = t.subtree(0).iter().map(|x| x.0).collect();
         assert_eq!(order, vec![3, 2, 1]);
+    }
+
+    #[core::prelude::v1::test]
+    fn nt_memory_sees_self_and_system() {
+        let m = nt_memory();
+        assert!(m[&std::process::id()].ws > 0 && m[&std::process::id()].private > 0);
+        assert!(m.contains_key(&4), "System process needs no handle"); // fails via OpenProcess without admin
     }
 
     #[core::prelude::v1::test]
