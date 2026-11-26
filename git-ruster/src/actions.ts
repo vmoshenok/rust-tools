@@ -411,12 +411,21 @@ export async function stashDrop(name: string) {
 
 const pathsOf = (f: FileChange) => (f.origPath ? [f.path, f.origPath] : [f.path]);
 
+// Paths to hand to `git add -A`. A path that exists in neither the index nor the work tree makes
+// git abort with "pathspec did not match any files", so skip changes that are already fully
+// staged that way: a staged deletion (x=D, y=' ') and the old side of a staged rename.
+const addPathsOf = (f: FileChange) => {
+  if (f.x === "D" && f.y === " ") return [];
+  if (f.x === "R") return [f.path];
+  return pathsOf(f);
+};
+
 export async function commit(opts: { files: FileChange[]; checked: Set<string>; message: string; amend: boolean; push: boolean }) {
   const r = repo();
   const info = getState().info;
   const cmds: Cmd[] = [];
   const unstage = opts.files.filter((f) => f.staged && !opts.checked.has(f.path)).flatMap(pathsOf);
-  const add = opts.files.filter((f) => opts.checked.has(f.path)).flatMap(pathsOf);
+  const add = opts.files.filter((f) => opts.checked.has(f.path)).flatMap(addPathsOf);
   if (unstage.length) cmds.push(await withPaths(["git", "reset", "-q"], unstage));
   if (add.length) cmds.push(await withPaths(["git", "add", "-A"], add));
 
@@ -439,7 +448,8 @@ export async function commit(opts: { files: FileChange[]; checked: Set<string>; 
 }
 
 export async function stageFiles(files: FileChange[]) {
-  run(await withPaths(["git", "add", "-A"], files.flatMap(pathsOf)));
+  const paths = files.flatMap(addPathsOf);
+  if (paths.length) run(await withPaths(["git", "add", "-A"], paths));
 }
 
 export async function unstageFiles(files: FileChange[]) {
